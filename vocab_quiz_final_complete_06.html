@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vocabulary Quiz</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+    #setup-screen, #quiz-screen { padding: 20px; max-width: 800px; margin: 0 auto; }
+    h1, h2 { text-align: center; margin: 10px 0; }
+    .hidden { display: none; }
+    #setup-screen label, #setup-screen select { display: block; margin: 10px 0; }
+    #range-form { margin: 10px 0; }
+    .question { font-size: 1.6em; font-weight: bold; margin: 20px 0; text-align: center; }
+    .choices { display: flex; flex-direction: column; gap: 10px; margin: 0 auto; max-width: 600px; }
+    .choice { padding: 10px; border-radius: 5px; border: 2px solid #ccc; background: #f9f9f9; cursor: pointer; text-align:left; }
+    .choice:hover { background: #ececec; }
+    .correct { border-color: green; background: #d4ffd4; }
+    .incorrect { border-color: red; background: #ffd4d4; }
+    #answer-input { text-align: center; margin: 20px 0; }
+    #answer-input input { padding: 8px; font-size: 1em; width: 60%; }
+    #keyboard { margin: 10px auto; max-width: 600px; }
+    .keyboard-row { display: flex; justify-content: center; gap: 5px; margin: 5px 0; }
+    .key { position: relative; padding: 10px; background: #eee; border: 1px solid #ccc; border-radius: 3px; min-width: 30px; text-align: center; }
+    .highlight { background: yellow; }
+    .count { position: absolute; top: 2px; right: 4px; font-size: 0.7em; color: #333; }
+    #result, #score, #summary { text-align: center; margin: 10px 0; font-size: 1.2em; }
+    .controls { display: flex; justify-content: space-between; max-width: 600px; margin: 20px auto; }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="setup-screen">
+    <h1>ตั้งค่า Vocabulary Quiz</h1>
+    <label>📁 เลือกไฟล์ Excel (.xlsx): <input type="file" id="file-input" accept=".xlsx"></label>
+    <label>🎯 เลือกโหมด:
+      <select id="mode">
+        <option value="1">โหมด 1: ศัพท์อังกฤษ → แปลไทย</option>
+        <option value="2">โหมด 2: ฟังเสียง → เลือกศัพท์อังกฤษ</option>
+        <option value="3">โหมด 3: ฟังเสียง → แปลไทย</option>
+        <option value="4">โหมด 4: แปลไทย → พิมพ์ศัพท์</option>
+        <option value="review">โหมดทบทวนคำผิด</option>
+        <option value="fast">โหมด Fast Quiz (10 คำ)</option>
+      </select>
+    </label>
+    <div id="range-form">
+      <label>ลำดับคำศัพท์จาก: <input type="number" id="startIndex" min="1"> ถึง: <input type="number" id="endIndex" min="1"></label>
+    </div>
+    <button id="start-btn">▶️ เริ่ม Quiz</button>
+  </div>
+
+  <div id="quiz-screen" class="hidden">
+    <h2 id="mode-name"></h2>
+    <div id="question" class="question"></div>
+    <div id="choices" class="choices"></div>
+    <div id="answer-input" class="hidden">
+      <input type="text" id="typed-answer" placeholder="พิมพ์คำศัพท์..." autocomplete="off" spellcheck="false" />
+      <button id="submit-btn">Submit</button>
+      <button id="hint-btn">🔑 ดูคำตอบ</button>
+      <div id="char-count"></div>
+    </div>
+    <div id="keyboard" class="hidden"></div>
+    <div id="result"></div>
+    <div id="score"></div>
+    <div id="summary"></div>
+    <div class="controls">
+      <button id="restart-btn">🔁 Restart</button>
+      <button id="next-btn">➡️ Next</button>
+    </div>
+  </div>
+
+  <audio id="correct-sound" src="correct-156911.mp3" preload></audio>
+  <audio id="wrong-sound" src="wronganswer-37702.mp3" preload></audio>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      let vocabData = [], quizWords = [], idx = 0, score = 0, wrong = [];
+      let mode = '1', start = 1, end = 0;
+      const setup = document.getElementById('setup-screen');
+      const quiz = document.getElementById('quiz-screen');
+      const modeName = document.getElementById('mode-name');
+      const inputEl = document.getElementById('typed-answer');
+      let guessedLetters = {};
+
+      // listeners
+      inputEl.addEventListener('input', updateKeyboardHighlight);
+      inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTypedAnswer(); } });
+
+      document.getElementById('file-input').addEventListener('change', handleFile);
+      document.getElementById('mode').addEventListener('change', () => {
+        mode = document.getElementById('mode').value;
+        document.getElementById('range-form').style.display = (mode === 'fast' || mode === 'review') ? 'none' : 'block';
+      });
+      document.getElementById('start-btn').addEventListener('click', startQuiz);
+      document.getElementById('next-btn').addEventListener('click', nextQuestion);
+      document.getElementById('restart-btn').addEventListener('click', () => location.reload());
+      document.getElementById('submit-btn').addEventListener('click', submitTypedAnswer);
+      document.getElementById('hint-btn').addEventListener('click', showHint);
+
+      function handleFile(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+          const data = new Uint8Array(ev.target.result);
+          const wb = XLSX.read(data, { type: 'array' });
+          const sheet = wb.Sheets[wb.SheetNames[0]];
+          vocabData = XLSX.utils.sheet_to_json(sheet);
+        };
+        reader.readAsArrayBuffer(file);
+      }
+
+      function startQuiz() {
+        if (!vocabData.length) { alert('โปรดเลือกไฟล์ก่อน'); return; }
+        mode = document.getElementById('mode').value;
+        if (mode !== 'fast' && mode !== 'review') {
+          start = parseInt(document.getElementById('startIndex').value);
+          end = parseInt(document.getElementById('endIndex').value);
+          if (isNaN(start) || isNaN(end) || start > end) { alert('ช่วงลำดับไม่ถูกต้อง'); return; }
+          wrong = [];
+        }
+        if (mode === 'fast') { quizWords = [...vocabData]; shuffle(quizWords); quizWords = quizWords.slice(0, 10); wrong = []; }
+        else if (mode === 'review') { if (!wrong.length) { alert('ไม่มีคำผิดให้ทบทวน'); return; } quizWords = [...wrong]; }
+        else { quizWords = vocabData.filter(v => v.Number >= start && v.Number <= end); shuffle(quizWords); }
+        idx = 0; score = 0;
+        setup.classList.add('hidden'); quiz.classList.remove('hidden');
+        modeName.textContent = document.getElementById('mode').selectedOptions[0].text;
+        nextQuestion();
+      }
+
+      function nextQuestion() {
+        if (idx >= quizWords.length) { endQuiz(); return; }
+        const q = quizWords[idx++]; guessedLetters = {};
+        document.getElementById('score').innerText = `คะแนน: ${score}/${quizWords.length}`;
+        document.getElementById('result').innerText = '';
+        document.getElementById('question').innerHTML = '';
+        document.getElementById('choices').innerHTML = '';
+        document.getElementById('answer-input').classList.add('hidden');
+        document.getElementById('keyboard').classList.add('hidden');
+        inputEl.value = '';
+
+        const qDiv = document.getElementById('question');
+        if (mode === '1') {
+          const pos = q['Part of Speech'] || '';
+          qDiv.innerHTML = `"${q.Word}"${pos ? ' (' + pos + ')' : ''}`;
+          playAudio(q.Word);
+        } else if (mode === 'fast') {
+          playAudio(q.Word);
+        } else if (mode === '2' || mode === '3') {
+          playAudio(q.Word);
+        }
+        const audioBtn = document.createElement('button'); audioBtn.textContent = '🔊'; audioBtn.onclick = () => playAudio(q.Word);
+        qDiv.appendChild(audioBtn);
+
+        if (mode === '4') {
+          qDiv.innerText = `คำแปล: ${q.Translation}` + (q['Part of Speech'] ? ' (' + q['Part of Speech'] + ')' : '');
+          document.getElementById('char-count').innerText = `ตัวอักษรทั้งหมด: ${q.Word.length}`;
+          document.getElementById('answer-input').classList.remove('hidden');
+          renderKeyboard(q.Word);
+          inputEl.focus();
+        } else {
+          renderMCQ(q);
+        }
+      }
+
+      function renderMCQ(q) {
+        const opts = [];
+        if (mode === '2') { opts.push(q.Word);
+          while (opts.length < 4) { const w = vocabData[Math.floor(Math.random()*vocabData.length)].Word; if (!opts.includes(w)) opts.push(w); }
+        } else { opts.push(q.Translation);
+          while (opts.length < 4) { const t = vocabData[Math.floor(Math.random()*vocabData.length)].Translation; if (!opts.includes(t)) opts.push(t); }
+        }
+        shuffle(opts);
+        opts.forEach(o => {
+          const b = document.createElement('button'); b.className='choice'; b.innerText=o;
+          b.onclick = () => checkMCQ(o, mode==='2'?q.Word:q.Translation, b);
+          document.getElementById('choices').appendChild(b);
+        });
+      }
+
+      function checkMCQ(sel, corr, btn) {
+        document.querySelectorAll('.choice').forEach(b=>b.disabled=true);
+        if (sel===corr) { btn.classList.add('correct'); score++; document.getElementById('correct-sound').play(); document.getElementById('result').innerText='✅ ถูกต้อง!'; setTimeout(nextQuestion,500);} 
+        else { btn.classList.add('incorrect'); document.querySelectorAll('.choice').forEach(b=>{ if(b.innerText===corr)b.classList.add('correct');}); document.getElementById('wrong-sound').play(); wrong.push(quizWords[idx-1]); document.getElementById('result').innerText=`❌ ผิด! คำตอบคือ ${corr}`; }
+      }
+
+      function submitTypedAnswer() {
+        updateKeyboardHighlight();
+        const ans = inputEl.value.trim(); const corr = quizWords[idx-1].Word;
+        if (ans===corr) { document.getElementById('correct-sound').play(); score++; document.getElementById('result').innerText='✅ ถูกต้อง!'; setTimeout(nextQuestion,500); }
+        else { document.getElementById('wrong-sound').play(); wrong.push(quizWords[idx-1]); document.getElementById('result').innerText=`❌ ผิด! คำตอบคือ ${corr}`; }
+      }
+
+      function showHint() { const corr=quizWords[idx-1].Word; inputEl.value=corr; document.getElementById('wrong-sound').play(); document.getElementById('result').innerText='ดูคำตอบแล้ว ถือว่าผิด'; updateKeyboardHighlight(); }
+
+      function renderKeyboard(word) {
+        const rows=['QWERTYUIOP','ASDFGHJKL','ZXCVBNM'];
+        const kb=document.getElementById('keyboard'); kb.innerHTML=''; kb.classList.remove('hidden'); const counts={}; word.toUpperCase().split('').forEach(c=>counts[c]=(counts[c]||0)+1);
+        rows.forEach(r=>{ const rowDiv=document.createElement('div'); rowDiv.className='keyboard-row'; r.split('').forEach(k=>{ const remain=(counts[k]||0)-(guessedLetters[k]||0); const div=document.createElement('div'); div.className='key'+(remain>0?' highlight':''); div.innerText=k; if(counts[k]){const sp=document.createElement('span'); sp.className='count'; sp.innerText=remain>0?remain:''; div.appendChild(sp);} rowDiv.appendChild(div);} ); kb.appendChild(rowDiv); });
+      }
+
+      function updateKeyboardHighlight() {
+        guessedLetters={}; const input=document.getElementById('typed-answer').value.toUpperCase(); for(let ch of input) guessedLetters[ch]=(guessedLetters[ch]||0)+1; renderKeyboard(quizWords[idx-1].Word);
+      }
+
+      function playAudio(text) { const u=new SpeechSynthesisUtterance(text); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }
+      function endQuiz() { document.getElementById('question').innerText='จบแบบทดสอบแล้ว!'; document.getElementById('choices').innerHTML=''; document.getElementById('summary').innerText=`คุณได้ ${score} จาก ${quizWords.length} คำ`; }
+      function shuffle(a) { for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } }
+    });
+  </script>
+</body>
+</html>
